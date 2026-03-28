@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes — Deep Dive</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e0e0e0;font-family:'Inter',sans-serif;line-height:1.7}
+a{color:#00D4FF;text-decoration:none}a:hover{text-decoration:underline}
+.back{display:inline-block;padding:12px 20px;color:#00D4FF;font-size:.9rem}
+.hero{text-align:center;padding:50px 20px 35px;background:linear-gradient(180deg,#0f1020 0%,#0a0a0f 100%)}
+.hero h1{font-size:2.6rem;font-weight:900;color:#00D4FF;margin-bottom:6px}
+.hero p{color:#888;font-size:1.05rem}
+.container{max-width:960px;margin:0 auto;padding:0 20px 60px}
+.card{background:#111122;border-radius:10px;padding:24px 28px;margin-bottom:28px;border-left:3px solid #00D4FF}
+.card h2{font-size:1.35rem;font-weight:700;color:#00D4FF;margin-bottom:14px}
+.card h3{font-size:1.05rem;font-weight:600;color:#ccc;margin:16px 0 8px}
+p,li{color:#bbb;font-size:.9rem;margin-bottom:6px}
+ul,ol{padding-left:20px;margin-bottom:10px}
+code{background:#1a1a2e;padding:2px 6px;border-radius:3px;font-size:.82rem;color:#00D4FF}
+pre{background:#0d0d1a;padding:14px;border-radius:6px;overflow-x:auto;font-size:.8rem;color:#aaa;margin:10px 0}
+table{width:100%;border-collapse:collapse;margin:10px 0;font-size:.85rem}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #1a1a2e}
+th{background:#15152a;color:#999;text-transform:uppercase;font-size:.72rem;letter-spacing:.5px}
+td:first-child{color:#00D4FF;font-weight:600}
+details{margin:10px 0}
+summary{cursor:pointer;color:#00D4FF;font-weight:600;font-size:.9rem;padding:6px 0}
+summary:hover{color:#33e0ff}
+details[open] summary{margin-bottom:8px}
+.mermaid{font-size:.8rem;margin:12px 0}
+.num{display:inline-block;background:#00D4FF;color:#0a0a0f;width:22px;height:22px;border-radius:50%;text-align:center;font-size:.75rem;font-weight:700;line-height:22px;margin-right:6px;flex-shrink:0}
+.step{display:flex;align-items:flex-start;margin-bottom:10px}
+.step p{margin:0}
+footer{text-align:center;padding:30px 20px;color:#444;font-size:.78rem}
+</style>
+</head>
+<body>
+<a class="back" href="index.html">← Back to Comparison</a>
+<div class="hero">
+<h1>Hermes — Deep Dive</h1>
+<p>by Nous Research</p>
+</div>
+<div class="container">
+
+<!-- 1. What is Hermes? -->
+<div class="card">
+<h2>What is Hermes?</h2>
+<p><strong>In plain English:</strong> Hermes is an AI assistant that takes actions on your computer and talks to you on messaging apps. Send it a message on Telegram, Discord, or the command line — it thinks about what to do, uses tools (terminal, browser, file editor), and responds. It's not just a chatbot; it's an <em>agent</em> that acts.</p>
+<p><strong>The problem it solves:</strong> LLMs can generate text but can't browse the web, run code, or remember past conversations. Hermes wraps an LLM in an "agent loop" — giving it tools, memory, and multi-step autonomy.</p>
+<p><strong>Who made it:</strong> <a href="https://nousresearch.com">Nous Research</a> (open-source AI research org). MIT-licensed, Python, provider-agnostic — works with Anthropic, OpenAI, OpenRouter, and 10+ other backends.</p>
+</div>
+
+<!-- 2. Architecture Overview -->
+<div class="card">
+<h2>Architecture Overview</h2>
+<p>This diagram shows the complete message flow from user input to final response:</p>
+<pre class="mermaid">
+flowchart TD
+    U["👤 User Message<br/>(Telegram / CLI / Discord / etc.)"] --> GW["Gateway / CLI Router"]
+    GW --> SES["Session Resolver<br/>(SQLite state.db)"]
+    SES --> PB["Prompt Builder"]
+    PB --> PC["Preflight Compression"]
+    PC --> LOOP{"🔄 Agent Loop<br/>(max 90 iterations)"}
+    LOOP --> LLM["LLM API Call<br/>(streaming)"]
+    LLM --> DEC{Response Type?}
+    DEC -->|"Tool Calls"| EXEC["Tool Executor<br/>(parallel if safe)"]
+    EXEC --> LOOP
+    DEC -->|"Text Only"| POST["Post-Loop"]
+    POST --> MEM["Memory Flush + Skill Nudge"]
+    MEM --> SAVE["Save Session to SQLite"]
+    SAVE --> RESP["📨 Deliver Response"]
+    style U fill:#0d2a3a,stroke:#00D4FF
+    style LOOP fill:#0d2a3a,stroke:#00D4FF
+    style LLM fill:#0d2a3a,stroke:#00D4FF
+    style EXEC fill:#0d2a3a,stroke:#00D4FF
+    style RESP fill:#0d2a3a,stroke:#00D4FF
+</pre>
+
+<h3>What Each Box Does</h3>
+<ol>
+<li><strong>User Message:</strong> Raw text, voice memo, or image from any platform.</li>
+<li><strong>Gateway / CLI Router:</strong> Entry point. The Gateway is a long-running process connecting all messaging platforms. CLI handles terminal input directly.</li>
+<li><strong>Session Resolver:</strong> Finds/creates a conversation session per user in SQLite. Tracks history, usage, costs. Resets after idle timeout (default: 24h).</li>
+<li><strong>Prompt Builder:</strong> Assembles the system prompt — hidden instructions the LLM reads before your message. Combines: identity (<code>SOUL.md</code>), memory, matched skills, context files, platform hints, and tool definitions (JSON schemas).</li>
+<li><strong>Preflight Compression:</strong> If history already exceeds context window, compress before starting the loop.</li>
+<li><strong>Agent Loop:</strong> Core cycle — call LLM → check for tool calls → execute → feed results back → repeat. Max 90 iterations.</li>
+<li><strong>LLM API Call:</strong> Streaming request to provider. Tokens arrive incrementally, enabling health monitoring (90s stale detection).</li>
+<li><strong>Tool Executor:</strong> Runs requested tools. Read-only tools run in parallel (8 workers max); writes run sequentially.</li>
+<li><strong>Post-Loop:</strong> Agent nudged to update memory and optionally save complex workflows as skills.</li>
+<li><strong>Save & Deliver:</strong> Conversation persisted to SQLite with FTS5 indexing. Response delivered to user's platform.</li>
+</ol>
+</div>
+
+<!-- 3. The Agent Loop -->
+<div class="card">
+<h2>The Agent Loop — How It Actually Works</h2>
+<h3>Walkthrough: "What's the weather in Berlin?"</h3>
+<div class="step"><span class="num">1</span><p>You type "what's the weather in Berlin?" on Telegram.</p></div>
+<div class="step"><span class="num">2</span><p>The Telegram adapter receives this, resolves your session, and creates a fresh <code>AIAgent</code> instance with your conversation history.</p></div>
+<div class="step"><span class="num">3</span><p>The Prompt Builder assembles the system prompt (identity, memory, skills list, tool definitions) and appends your message to the conversation history.</p></div>
+<div class="step"><span class="num">4</span><p>The agent sends everything to the LLM. The LLM sees the tool definitions and decides: "I need to search the web for Berlin weather." It responds with a <strong>tool call</strong> — a structured JSON object like <code>{"name": "web_search", "arguments": {"query": "weather Berlin today"}}</code>.</p></div>
+<div class="step"><span class="num">5</span><p>The Tool Executor runs <code>web_search</code>, gets results, and appends them to the conversation as a "tool result" message.</p></div>
+<div class="step"><span class="num">6</span><p>The loop continues — the LLM now sees the search results and generates a plain text response: "It's 12°C and cloudy in Berlin today." No more tool calls, so the loop breaks.</p></div>
+<div class="step"><span class="num">7</span><p>The response is delivered back to Telegram. Session saved.</p></div>
+
+<h3>Key Concepts</h3>
+<details>
+<summary>What is a Tool Call / Function Calling?</summary>
+<p>LLMs generate text but can't run commands or browse websites. <strong>Function calling</strong> is a protocol where the LLM outputs a structured JSON request (e.g., <code>{"name":"web_search","arguments":{"query":"..."}}</code>) instead of text. The host executes it, returns results, and the LLM continues. Hermes registers 35+ tools with JSON schemas telling the LLM what each accepts.</p>
+</details>
+<details>
+<summary>Parallel Tool Execution</summary>
+<p>When the LLM requests multiple tools at once, read-only tools (<code>read_file</code>, <code>web_search</code>, <code>vision_analyze</code>) run simultaneously via thread pool (8 workers max). Writes run sequentially. Path-scoped tools targeting different files can also parallelize. <code>clarify</code> never runs in parallel.</p>
+</details>
+<details>
+<summary>Context Compression</summary>
+<p>Every LLM has a <strong>context window</strong> — max text it can process (e.g., 200K tokens). As conversations grow, the context fills. At 50% capacity, Hermes triggers compression: an auxiliary LLM summarizes older messages, preserving key info while freeing space. Last 20 messages always kept intact. Conversations can run indefinitely.</p>
+</details>
+<details>
+<summary>Iteration Budget</summary>
+<p>90 iterations per conversation (50 for subagents). Prevents infinite loops. Budget warnings injected as limit approaches.</p>
+</details>
+</div>
+
+<!-- 4. Tools & Toolsets -->
+<div class="card">
+<h2>Tools & Toolsets</h2>
+<p>A <strong>toolset</strong> is a logical grouping of related tools. Different platforms can enable different toolsets — for example, the CLI might enable browser tools while a Slack bot might not. This keeps the tool list focused and reduces token usage (every tool definition costs tokens in the prompt).</p>
+
+<table>
+<tr><th>Toolset</th><th>Tools</th><th>Purpose</th></tr>
+<tr><td>terminal</td><td>terminal, process</td><td>Shell execution &amp; background process management</td></tr>
+<tr><td>file</td><td>read_file, write_file, patch, search_files</td><td>File system operations with fuzzy-match editing</td></tr>
+<tr><td>web</td><td>web_search, web_extract</td><td>Internet search &amp; page content extraction</td></tr>
+<tr><td>browser</td><td>navigate, snapshot, click, type, scroll, back, press, close, get_images, vision, console</td><td>Full Playwright browser automation</td></tr>
+<tr><td>memory</td><td>memory</td><td>Persistent curated memory (add/replace/remove/read)</td></tr>
+<tr><td>skills</td><td>skills_list, skill_view, skill_manage</td><td>Skill discovery, viewing, and creation</td></tr>
+<tr><td>session_search</td><td>session_search</td><td>FTS5 search across past conversations</td></tr>
+<tr><td>delegation</td><td>delegate_task</td><td>Spawn isolated subagents for subtasks</td></tr>
+<tr><td>cronjob</td><td>cronjob</td><td>Scheduled task management (create/list/pause/trigger)</td></tr>
+<tr><td>messaging</td><td>send_message</td><td>Cross-platform message delivery</td></tr>
+<tr><td>vision</td><td>vision_analyze</td><td>Image analysis via LLM</td></tr>
+<tr><td>image_gen</td><td>image_generate</td><td>AI image generation</td></tr>
+<tr><td>tts</td><td>text_to_speech</td><td>Text-to-speech (Edge/ElevenLabs/OpenAI)</td></tr>
+<tr><td>code_execution</td><td>execute_code</td><td>Run Python scripts that call tools programmatically</td></tr>
+<tr><td>moa</td><td>mixture_of_agents</td><td>Query multiple LLMs and synthesize answers</td></tr>
+<tr><td>clarify</td><td>clarify</td><td>Ask user clarifying questions mid-task</td></tr>
+<tr><td>todo</td><td>todo</td><td>Task planning and tracking</td></tr>
+<tr><td>homeassistant</td><td>ha_list_entities, ha_get_state, ha_list_services, ha_call_service</td><td>Smart home control</td></tr>
+<tr><td>honcho</td><td>honcho_context, honcho_profile, honcho_search, honcho_conclude</td><td>Cross-session AI memory (Honcho integration)</td></tr>
+</table>
+
+<details>
+<summary>Key Tool Deep-Dives</summary>
+<p><strong>Terminal:</strong> Shell execution with 6 backends — local, Docker (isolated), SSH (remote), Daytona, Singularity, Modal. Persistent shell session (cd/env carry over). 180s timeout.</p>
+<p><strong>Browser:</strong> Full Playwright automation — navigate, snapshot (text DOM), click, type, scroll, screenshot + vision analysis. 11 tool functions.</p>
+<p><strong>File Tools:</strong> <code>read_file</code> (paginated), <code>write_file</code>, <code>patch</code> (9 fuzzy-match strategies), <code>search_files</code> (ripgrep-backed).</p>
+<p><strong>Delegate:</strong> Spawns isolated subagent with own budget (50 iterations), history, and toolset subset. Enables divide-and-conquer.</p>
+<p><strong>Memory:</strong> Single tool with add/replace/remove/read actions on two Markdown files. See Memory section below.</p>
+</details>
+</div>
+
+<!-- 5. Memory System -->
+<div class="card">
+<h2>Memory System</h2>
+<p><strong>Why memory matters:</strong> Without persistent memory, every conversation starts from zero. The agent wouldn't remember your name, your preferences, your project structure, or lessons learned from past mistakes. Memory transforms a stateless chatbot into a personalized assistant that improves over time.</p>
+
+<h3>MEMORY.md — Agent's Notebook</h3>
+<p>Stored at <code>~/.hermes/memories/MEMORY.md</code>. This is the agent's personal notepad for facts about the environment, project conventions, tool quirks, and anything it wants to remember. Entries are delimited by <code>§</code> (section sign). Character limit: <strong>2,200 chars</strong> (configurable). Example entries: "User's project uses Poetry for dependency management" or "The Docker container maps port 8080 to 3000."</p>
+
+<h3>USER.md — User Profile</h3>
+<p>Stored at <code>~/.hermes/memories/USER.md</code>. Separate from MEMORY.md because user preferences and agent observations serve different purposes. USER.md stores: communication style preferences, technical skill level, workflow habits, timezone, name. Character limit: <strong>1,375 chars</strong>. Keeping it separate lets the agent reason about "what I know about the world" vs. "what I know about this person."</p>
+
+<h3>Frozen Snapshot Pattern</h3>
+<p>Memory is injected into the system prompt once at session start. Mid-session writes update disk but NOT the running prompt — this preserves Anthropic's prompt cache (unchanged prompts reuse cached tokens, saving ~75%). Changes take effect next session.</p>
+
+<h3>Session Search (FTS5)</h3>
+<p><strong>FTS5</strong> (Full-Text Search 5) is SQLite's built-in search engine. It builds an inverted index — a mapping from every word to rows containing it — enabling fast keyword search. Hermes indexes every message from every session. The <code>session_search</code> tool searches past conversations by keyword, cheaper and faster than vector search for exact lookups.</p>
+
+<h3>Memory Nudge System</h3>
+<p>Every 10 user turns, the agent is nudged to update memory. After 6+ turns, a background LLM can extract facts automatically.</p>
+</div>
+
+<!-- 6. Skills System -->
+<div class="card">
+<h2>Skills System</h2>
+<p>A <strong>skill</strong> is a saved procedure — a Markdown document that teaches the agent how to perform a specific task. Think of it as a recipe card: "Here's how to deploy to Kubernetes" or "Here's how to create a GitHub PR." Skills are the mechanism by which the agent gets <em>better over time</em>.</p>
+
+<h3>How Skills Are Structured</h3>
+<pre>skills/
+└── software-development/
+    └── deploy-to-k8s/
+        ├── SKILL.md          # Main instructions (YAML frontmatter + markdown)
+        ├── references/       # Supporting docs
+        └── templates/        # Output templates</pre>
+<p>The <code>SKILL.md</code> file has YAML frontmatter (metadata at the top between <code>---</code> markers) specifying: name, description, version, supported platforms, and prerequisites (required env vars, commands). The body contains step-by-step instructions in Markdown.</p>
+
+<h3>Progressive Disclosure (3 Tiers)</h3>
+<p>Loading all skill content into every prompt would waste tokens. Instead:</p>
+<ul>
+<li><strong>Tier 1</strong> (<code>skills_list</code>): Only name + description are shown. Very cheap in tokens.</li>
+<li><strong>Tier 2</strong> (<code>skill_view</code>): Full instructions loaded on demand when the agent decides a skill is relevant.</li>
+<li><strong>Tier 3</strong> (<code>skill_view + file_path</code>): Reference files and templates loaded only when actively executing the skill.</li>
+</ul>
+
+<h3>Skills Hub</h3>
+<p>Integration with <a href="https://agentskills.io">agentskills.io</a> for discovering and installing community-created skills. The agent can search, install, and share skills from a public registry.</p>
+
+<h3>Self-Improvement Loop</h3>
+<p>After complex multi-tool tasks, the agent is nudged: "That was a complex workflow — would you like to save it as a skill?" A skills guard system scans new skills for safety (preventing malicious content). There are <strong>26 built-in skill categories</strong> covering: software development, data science, research, creative writing, home automation, social media, and more — 70+ skills out of the box.</p>
+</div>
+
+<!-- 7. Provider System -->
+<div class="card">
+<h2>Provider System</h2>
+<p>A <strong>provider</strong> is the LLM backend — the service that actually runs the AI model. Hermes is provider-agnostic: it can talk to many different LLM services through a unified interface.</p>
+
+<h3>Supported Providers</h3>
+<table>
+<tr><th>Provider</th><th>API Mode</th><th>Auth</th></tr>
+<tr><td>OpenRouter</td><td>chat_completions</td><td>API key</td></tr>
+<tr><td>Anthropic (native)</td><td>anthropic_messages</td><td>API key</td></tr>
+<tr><td>OpenAI</td><td>codex_responses</td><td>API key</td></tr>
+<tr><td>Nous Portal</td><td>chat_completions</td><td>OAuth</td></tr>
+<tr><td>GitHub Copilot</td><td>chat_completions</td><td>ACP protocol</td></tr>
+<tr><td>z.ai / GLM</td><td>chat_completions</td><td>API key</td></tr>
+<tr><td>Kimi / Moonshot</td><td>chat_completions</td><td>API key</td></tr>
+<tr><td>MiniMax</td><td>chat_completions</td><td>API key</td></tr>
+<tr><td>AI Gateway</td><td>chat_completions</td><td>env-based</td></tr>
+<tr><td>Custom endpoint</td><td>chat_completions</td><td>API key + base URL</td></tr>
+</table>
+
+<details>
+<summary>API Modes Explained</summary>
+<p><strong>chat_completions:</strong> OpenAI's standard format (de facto industry standard). Send messages array, get assistant response. <strong>anthropic_messages:</strong> Anthropic's native API with prompt caching support. Auto-detected for <code>api.anthropic.com</code>. <strong>codex_responses:</strong> OpenAI's Responses API for GPT-5.x and tool-heavy workloads.</p>
+</details>
+<details>
+<summary>Prompt Caching & Cost Savings</summary>
+<p>The system prompt is identical every turn. Prompt caching marks it as cacheable — Anthropic stores processed tokens server-side, reusing them at ~25% cost. Hermes uses 4 cache breakpoints (<code>system_and_3</code> strategy) for ~75% input cost reduction on multi-turn conversations.</p>
+</details>
+<details>
+<summary>Smart Routing & Fallback</summary>
+<p><strong>Smart routing:</strong> Simple messages go to a cheap model (e.g., Gemini Flash); complex work uses the primary model. <strong>Fallback:</strong> On rate limit (429), overload (529), or service error (503), auto-switches to a fallback provider.</p>
+</details>
+</div>
+
+<!-- 8. Platform Adapters -->
+<div class="card">
+<h2>Platform Adapters</h2>
+<p>A <strong>platform adapter</strong> is a module that translates between a messaging platform's API and Hermes's internal message format. Each adapter handles: receiving messages (via webhooks, polling, or WebSockets), sending responses (text, media, files), managing platform-specific features (reactions, threads, stickers), and formatting output appropriately.</p>
+
+<h3>Supported Platforms (14)</h3>
+<table>
+<tr><th>Platform</th><th>Key Features</th></tr>
+<tr><td>Telegram</td><td>Bot API, voice memos, stickers, groups, threads</td></tr>
+<tr><td>Discord</td><td>Bot, threads, reactions, mention triggers</td></tr>
+<tr><td>Slack</td><td>Bolt framework, threads, channels</td></tr>
+<tr><td>WhatsApp</td><td>Business API, media handling</td></tr>
+<tr><td>Signal</td><td>Signal CLI bridge, encrypted messaging</td></tr>
+<tr><td>Matrix</td><td>Matrix protocol, E2E encryption</td></tr>
+<tr><td>Mattermost</td><td>WebSocket, channels</td></tr>
+<tr><td>DingTalk</td><td>China enterprise messaging</td></tr>
+<tr><td>Email</td><td>IMAP/SMTP, attachments</td></tr>
+<tr><td>Home Assistant</td><td>Smart home conversation interface</td></tr>
+<tr><td>SMS</td><td>Twilio-based SMS messaging</td></tr>
+<tr><td>Webhook</td><td>Generic HTTP webhook integration</td></tr>
+<tr><td>REST API</td><td>Full programmatic API server</td></tr>
+</table>
+
+<details>
+<summary>Gateway Architecture & Message Flow</summary>
+<p>The Gateway (<code>hermes gateway start</code>) is a single process managing all adapters simultaneously. Message flow: adapter receives message → checks DM auth → resolves session from SQLite → transcribes voice/caches images → creates <code>AIAgent</code> with platform toolsets → runs agent loop → splits response into platform chunks → delivers with media → updates session. The gateway also runs the cron scheduler (tick every 60s) and manages cross-platform channel directory.</p>
+</details>
+</div>
+
+<!-- 9. Cron & Scheduling -->
+<div class="card">
+<h2>Cron & Scheduling</h2>
+<p><strong>What is cron?</strong> In Unix systems, <code>cron</code> is a time-based job scheduler — it runs tasks automatically at specified intervals (e.g., "every Monday at 9am" or "every 6 hours"). Hermes has its own cron system that lets the agent schedule recurring tasks.</p>
+
+<h3>How It Works</h3>
+<ul>
+<li>Jobs are stored in <code>~/.hermes/cron/jobs.json</code></li>
+<li>The Gateway calls <code>scheduler.tick()</code> every 60 seconds from a background thread</li>
+<li>The scheduler uses <code>croniter</code> (a Python library) to parse cron expressions and determine which jobs are due</li>
+<li>For each due job: a fresh AIAgent is created, the job's prompt is executed (with optional skill loading), and output is saved</li>
+<li>File-level locking prevents concurrent tick execution</li>
+</ul>
+
+<h3>Job Features</h3>
+<ul>
+<li><strong>Natural language scheduling:</strong> You say "remind me every Monday at 9am to check server logs" and the agent creates the cron expression</li>
+<li><strong>Cross-platform delivery:</strong> Output can go to <code>local</code> (saved only), <code>origin</code> (the chat that created it), or a specific target like <code>telegram:12345</code> or <code>discord:67890</code></li>
+<li><strong>One-shot jobs:</strong> Run once at a specific time (with a 120-second grace period) then auto-delete</li>
+<li><strong>Silent mode:</strong> Jobs can output <code>[SILENT]</code> to save results without messaging the user</li>
+<li><strong>Management:</strong> Create, list, update, pause, resume, remove, or manually trigger jobs</li>
+</ul>
+</div>
+
+<!-- 10. Security -->
+<div class="card">
+<h2>Security</h2>
+<h3>Command Approval System</h3>
+<p>Before executing potentially dangerous terminal commands, the approval system (<code>tools/approval.py</code>) checks against a policy. Commands can be auto-approved (safe), require user confirmation, or be blocked entirely. This prevents the agent from accidentally running <code>rm -rf /</code> or similar destructive operations.</p>
+
+<h3>Docker Isolation</h3>
+<p>The terminal backend can be configured to run inside a Docker container instead of the host machine. This provides OS-level isolation — even if the agent runs a malicious command, it's sandboxed inside a container with limited access to the host filesystem and network.</p>
+
+<h3>Tirith Security Engine</h3>
+<p>A policy engine (<code>tools/tirith_security.py</code>) that evaluates commands against configurable security rules. Named after the fortified city in Lord of the Rings, it provides defense-in-depth beyond simple command approval.</p>
+
+<h3>Additional Layers</h3>
+<ul>
+<li><strong>PII/Secret Redaction:</strong> Automatically redacts API keys, passwords, and personal information from outputs (<code>agent/redact.py</code>)</li>
+<li><strong>Prompt Injection Scanning:</strong> Memory content is scanned for injection attempts before being stored</li>
+<li><strong>URL Safety:</strong> URLs are checked against blocklists before browser navigation</li>
+<li><strong>Website Blocklist:</strong> Configurable list of domains the browser cannot visit</li>
+<li><strong>Skills Guard:</strong> New skills are scanned for malicious content before being saved</li>
+<li><strong>Iteration Budgets:</strong> Hard limits prevent runaway tool loops (90 for main agent, 50 for subagents)</li>
+</ul>
+</div>
+
+</div>
+<footer>Hermes Deep Dive — Data sourced from Hermes v0.4.0+ codebase analysis</footer>
+<script>mermaid.initialize({theme:'dark',themeVariables:{primaryColor:'#0d2a3a',primaryBorderColor:'#00D4FF',lineColor:'#00D4FF',textColor:'#e0e0e0',fontSize:'13px'}})</script>
+</body>
+</html>

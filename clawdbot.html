@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClawdBot (OpenClaw) — Deep Dive</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#c9d1d9;font-family:'Inter',system-ui,sans-serif;line-height:1.7;padding:0 1rem 3rem}
+a{color:#FFD700;text-decoration:none}a:hover{text-decoration:underline}
+.container{max-width:960px;margin:0 auto}
+.back{display:inline-block;margin:1.5rem 0;font-size:.9rem;opacity:.8}
+.hero{text-align:center;padding:3rem 0 2rem}
+.hero h1{font-size:2.4rem;color:#FFD700;margin-bottom:.5rem}
+.hero p{color:#8b949e;font-size:1.1rem}
+.card{background:#111122;border:1px solid #1e2a3a;border-radius:12px;padding:1.5rem 1.8rem;margin:1.5rem 0}
+h2{color:#FFD700;font-size:1.5rem;margin-bottom:1rem;border-bottom:1px solid #1e2a3a;padding-bottom:.5rem}
+h3{color:#e0c060;font-size:1.15rem;margin:1.2rem 0 .6rem}
+h4{color:#c0a840;margin:.8rem 0 .4rem}
+p,li{margin-bottom:.5rem}
+ul,ol{padding-left:1.5rem}
+code{background:#1a1a2e;padding:2px 6px;border-radius:4px;font-size:.9em;color:#FFD700}
+.tag{display:inline-block;background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:2px 10px;margin:2px;font-size:.82rem;color:#c9d1d9}
+.mermaid{background:#0d0d1a;border-radius:8px;padding:1rem;margin:1rem 0;overflow-x:auto}
+details{margin:.8rem 0}
+details summary{cursor:pointer;color:#FFD700;font-weight:600;padding:.4rem 0}
+details summary:hover{opacity:.85}
+table{width:100%;border-collapse:collapse;margin:.8rem 0;font-size:.9rem}
+th{background:#1a1a2e;color:#FFD700;text-align:left;padding:8px 12px;border:1px solid #1e2a3a}
+td{padding:8px 12px;border:1px solid #1e2a3a}
+.highlight{color:#FFD700;font-weight:600}
+.num{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;background:#FFD700;color:#0a0a0f;border-radius:50%;font-size:.8rem;font-weight:700;margin-right:6px;flex-shrink:0}
+.step{display:flex;align-items:flex-start;margin:.6rem 0}
+</style>
+</head>
+<body>
+<div class="container">
+<a href="index.html" class="back">← Back to Comparison</a>
+
+<div class="hero">
+<h1>ClawdBot (OpenClaw) — Deep Dive</h1>
+<p>A comprehensive technical analysis of the multi-channel AI personal assistant framework</p>
+<p style="font-size:.85rem;margin-top:.5rem;color:#666">Version 2026.1.24-3 · MIT License · <a href="https://github.com/clawdbot/clawdbot">GitHub</a></p>
+</div>
+
+<!-- SECTION 1: What is ClawdBot -->
+<div class="card">
+<h2>What is ClawdBot?</h2>
+<p><strong>In plain English:</strong> ClawdBot is an AI assistant that lives on your messaging apps — Telegram, WhatsApp, Discord, Signal, Slack, iMessage, and more. You text it like a friend, and it can read files, write code, search the web, control devices, and remember things across conversations.</p>
+<p><strong>The problem it solves:</strong> Most AI tools are separate apps you switch to, forget everything between sessions, and can't take actions. ClawdBot meets you where you already are (chat apps), remembers context persistently (via files on disk), and executes real actions (code, web, files, devices).</p>
+
+<h3>The Naming</h3>
+<ul>
+<li><span class="highlight">ClawdBot</span> — The runtime: the npm package you install and run as a daemon on your server.</li>
+<li><span class="highlight">OpenClaw</span> — The open-source project: community, GitHub repo, ecosystem. Formerly "Moltbot."</li>
+</ul>
+</div>
+
+<!-- SECTION 2: Architecture -->
+<div class="card">
+<h2>Architecture Overview</h2>
+
+<div class="mermaid">
+graph TD
+  A["👤 User sends message<br/>(Telegram, WhatsApp, etc.)"] --> B["📡 Channel Adapter<br/>(grammY, Baileys, discord.js)"]
+  B --> C["🔌 Gateway WebSocket Server<br/>(port 18789)"]
+  C --> D["🔑 Session Router<br/>(session key resolution)"]
+  D --> E["📋 Session Lane Queue<br/>(per-session serialization)"]
+  E --> F["🌐 Global Lane Queue<br/>(bounded concurrency: max 4)"]
+  F --> G["🧠 Agent Run Setup<br/>(model + auth + system prompt)"]
+  G --> H["⚡ LLM Streaming<br/>(pi-ai streamSimple)"]
+  H --> I{"Tool Call?"}
+  I -->|Yes| J["🔧 Execute Tool<br/>(read/write/exec/browser)"]
+  J --> H
+  I -->|No| K["📤 Response Processing<br/>(auto-reply pipeline)"]
+  K --> L["💬 Channel Delivery<br/>(format + chunk + send)"]
+  L --> A
+</div>
+
+<h3>Numbered Explanation of Every Component</h3>
+
+<div class="step"><span class="num">1</span><div><strong>Channel Adapter</strong> — Translates platform-specific messages into common format. Uses <code>grammY</code> (Telegram), <code>Baileys</code> (WhatsApp), <code>discord.js</code> (Discord), etc.</div></div>
+<div class="step"><span class="num">2</span><div><strong>Gateway WebSocket Server</strong> — Central nervous system on port 18789. All adapters connect here for real-time communication.</div></div>
+<div class="step"><span class="num">3</span><div><strong>Session Router</strong> — Maps messages to conversations via unique keys like <code>agent:main:telegram:group:12345</code>.</div></div>
+<div class="step"><span class="num">4</span><div><strong>Session Lane</strong> — Per-conversation serialization. Messages in one chat are processed in order.</div></div>
+<div class="step"><span class="num">5</span><div><strong>Global Lane</strong> — Cross-conversation concurrency limit (default: 4 simultaneous agent runs).</div></div>
+<div class="step"><span class="num">6</span><div><strong>Agent Run Setup</strong> — Picks model, authenticates, loads workspace files, builds system prompt, creates tools.</div></div>
+<div class="step"><span class="num">7</span><div><strong>LLM Streaming</strong> — Streams response token-by-token via <code>streamSimple()</code>. Tool calls pause streaming, execute, return results, and resume.</div></div>
+<div class="step"><span class="num">8</span><div><strong>Response Processing</strong> — Parses directives (media, reply targets), formats per platform, handles heartbeat replies.</div></div>
+
+<details>
+<summary>What is a WebSocket? Why use it here?</summary>
+<p><strong>HTTP</strong> is request-response: client asks, server answers, connection closes. <strong>WebSocket</strong> is a persistent, bidirectional connection — both sides can send messages anytime. Think of HTTP as letters vs WebSocket as a phone call.</p>
+<p><strong>Why here?</strong> ClawdBot needs real-time communication between adapters and the core. Messages must reach the agent instantly; response chunks must reach channels instantly. WebSocket provides this always-on, low-latency pipeline.</p>
+</details>
+
+<details>
+<summary>What is Lane-Based Concurrency?</summary>
+<p>A <strong>lane</strong> is a bounded queue. ClawdBot uses two nested lanes:</p>
+<ul>
+<li><strong>Session Lane (1 per session)</strong> — Messages in one chat process in order.</li>
+<li><strong>Global Lane (4 total)</strong> — Only 4 agent runs across all sessions simultaneously.</li>
+</ul>
+<p>Nesting: <code>enqueueSession(() => enqueueGlobal(async () => { ... }))</code>. Per-session ordering AND global resource control.</p>
+</details>
+</div>
+
+<!-- SECTION 3: Agent Loop -->
+<div class="card">
+<h2>The Agent Loop</h2>
+
+<h3>Step-by-Step: What Happens When You Send "What's the weather?"</h3>
+<ol>
+<li><strong>Channel receives</strong> — grammY gets the Telegram message, extracts text/media/metadata.</li>
+<li><strong>Gateway routes</strong> to session <code>agent:main:telegram:dm:your-id</code>.</li>
+<li><strong>Queue enqueues</strong> — waits for session turn, then global slot.</li>
+<li><strong>Model resolution</strong> — picks configured model, selects a non-rate-limited auth profile.</li>
+<li><strong>System prompt assembly</strong> — concatenates: AGENTS.md, SOUL.md, USER.md, skills, tools, runtime info.</li>
+<li><strong>Streaming begins</strong> — full prompt + history + message go to LLM via <code>streamSimple()</code>.</li>
+<li><strong>Tool call</strong> — model calls <code>web_search</code>, tool executes, results return to model.</li>
+<li><strong>Model continues</strong> — formulates answer from tool results.</li>
+<li><strong>Response delivered</strong> — formatted, chunked, sent back through Gateway to Telegram.</li>
+</ol>
+
+<h3>The pi-coding-agent SDK</h3>
+<p>ClawdBot uses <code>@mariozechner/pi-coding-agent</code> and <code>@mariozechner/pi-ai</code> SDKs for the core agent loop: sending prompts, streaming responses, parsing tool calls, managing history.</p>
+<p><strong>Why an SDK?</strong> Agent loops have subtle complexity: streaming parsing, tool call extraction, context management, retries. The SDK handles this, letting ClawdBot focus on channels, memory, skills, and identity.</p>
+
+<details>
+<summary>What is a Sub-Agent? When and Why?</summary>
+<p>A <strong>sub-agent</strong> is a separate AI conversation spawned by the main agent with its own session and context window, running in parallel.</p>
+<p><strong>When to spawn one?</strong></p>
+<ul>
+<li>Parallelizable work: "Research 5 companies" → spawn 5 sub-agents.</li>
+<li>Different model needed: main uses Opus, sub-agent uses cheaper Sonnet.</li>
+<li>Context preservation: offload to a sub-agent rather than filling the main context window.</li>
+</ul>
+<p><strong>Isolation:</strong> Own session key, history, and context. Communicates via <code>sessions_send</code>/<code>sessions_history</code>. Max concurrent: 8.</p>
+</details>
+</div>
+
+<!-- SECTION 4: Tools & Skills -->
+<div class="card">
+<h2>Tools & Skills</h2>
+
+<h3>Built-in Tools</h3>
+<table>
+<tr><th>Tool</th><th>What It Does</th></tr>
+<tr><td><code>read</code> / <code>write</code> / <code>edit</code></td><td>File operations — read, create, or make precise edits to files</td></tr>
+<tr><td><code>exec</code> / <code>process</code></td><td>Run shell commands (foreground or background), with PTY support</td></tr>
+<tr><td><code>grep</code> / <code>find</code> / <code>ls</code></td><td>Search file contents, find files by pattern, list directories</td></tr>
+<tr><td><code>web_search</code> / <code>web_fetch</code></td><td>Search the web (Brave API) and extract readable content from URLs</td></tr>
+<tr><td><code>browser</code></td><td>Control a Chrome instance via CDP (Chrome DevTools Protocol) for full web automation</td></tr>
+<tr><td><code>memory_search</code> / <code>memory_get</code></td><td>Search the hybrid memory index or retrieve specific memory entries</td></tr>
+<tr><td><code>sessions_spawn</code> / <code>sessions_send</code></td><td>Create sub-agents or communicate between agent sessions</td></tr>
+<tr><td><code>message</code></td><td>Send messages and perform channel actions (reactions, pins, etc.)</td></tr>
+<tr><td><code>cron</code></td><td>Schedule recurring tasks and wake events</td></tr>
+<tr><td><code>tts</code></td><td>Convert text to speech audio</td></tr>
+<tr><td><code>canvas</code></td><td>Render visual content on connected device displays</td></tr>
+</table>
+
+<h3>Skills vs Tools</h3>
+<p><strong>Tools</strong> = code-level functions the agent calls directly (read a file, run a command). Built into the runtime.</p>
+<p><strong>Skills</strong> = prompt-level instructions (<code>SKILL.md</code> markdown files) that teach the agent to accomplish tasks using existing tools. Example: "To check weather, use <code>exec</code> to run <code>curl wttr.in</code>."</p>
+
+<h3>The ClawdHub Skill Registry</h3>
+<p><a href="https://clawdhub.com">ClawdHub</a> is npm for agent skills. The agent can discover, install, and use community skills autonomously — all from a chat message. Three tiers:</p>
+<ul>
+<li><strong>54 Bundled Skills</strong> — ship with ClawdBot, always available</li>
+<li><strong>Managed Skills</strong> — installed from ClawdHub</li>
+<li><strong>Workspace Skills</strong> — custom skills you create in <code>~/clawd/skills/</code></li>
+</ul>
+
+<details>
+<summary>Examples of Bundled Skill Categories (54 total)</summary>
+<ul>
+<li><strong>Productivity:</strong> apple-notes, apple-reminders, notion, obsidian, things-mac, trello, github</li>
+<li><strong>Communication:</strong> himalaya (email), imsg (iMessage), slack, discord, voice-call</li>
+<li><strong>Media:</strong> spotify-player, songsee, openai-image-gen, video-frames, gifgrep</li>
+<li><strong>Smart Home:</strong> openhue (Philips Hue), sonoscli (Sonos speakers)</li>
+<li><strong>AI/ML:</strong> gemini, coding-agent, openai-whisper (speech-to-text), sag (ElevenLabs TTS)</li>
+<li><strong>Utilities:</strong> weather, local-places, goplaces, food-order, blogwatcher</li>
+<li><strong>System:</strong> tmux, session-logs, model-usage, skill-creator, camsnap</li>
+</ul>
+</details>
+</div>
+
+<!-- SECTION 5: Memory System -->
+<div class="card">
+<h2>Memory System</h2>
+
+<h3>The Three Core Memory Files</h3>
+<p>ClawdBot uses plain markdown files as its memory — no proprietary database, just files you can read and edit yourself:</p>
+
+<table>
+<tr><th>File</th><th>Purpose</th><th>Who Writes It</th></tr>
+<tr><td><code>MEMORY.md</code></td><td>Long-term curated facts — things the agent has learned and wants to remember: your preferences, project details, important decisions</td><td>The agent maintains it</td></tr>
+<tr><td><code>USER.md</code></td><td>Your profile — name, timezone, communication preferences, context the agent needs about you</td><td>You (during onboarding) + agent updates</td></tr>
+<tr><td><code>SOUL.md</code></td><td>The agent's personality, identity, and behavioral rules — its "soul"</td><td>You customize it</td></tr>
+</table>
+
+<p><strong>Why three files?</strong> Separation of concerns. USER.md is about <em>you</em> (rarely changes). SOUL.md is about the <em>agent's identity</em> (set once, tweak occasionally). MEMORY.md is the <em>working knowledge base</em> (constantly updated). This lets you reset memory without losing personality, or change personality without losing memory.</p>
+
+<details>
+<summary>SOUL.md — What is an Agent's "Soul"?</summary>
+<p>SOUL.md defines the agent's persistent personality:</p>
+<ul>
+<li><strong>Personality:</strong> Formal or casual? Verbose or terse?</li>
+<li><strong>Identity:</strong> Name, self-reference style</li>
+<li><strong>Constraints:</strong> Things it should never do, sensitive topics</li>
+<li><strong>Style:</strong> Greetings, error handling, emoji usage</li>
+</ul>
+<p>Injected into every system prompt for consistent behavior across all conversations.</p>
+</details>
+
+<h3>Hybrid Search: BM25 + Vector Embeddings</h3>
+<p>When the agent searches its memory, it uses <em>two completely different search strategies</em> and combines them:</p>
+
+<details>
+<summary>BM25 — Keyword Search (30% weight)</summary>
+<p><strong>BM25</strong> (Best Matching 25) — a ranking algorithm from 1994, still the gold standard for keyword search (Elasticsearch, SQLite FTS5). It scores documents based on:</p>
+<ul>
+<li><strong>Term Frequency:</strong> How often search terms appear (diminishing returns)</li>
+<li><strong>Inverse Document Frequency:</strong> Rare words score higher ("portfolio" in 2/1000 docs beats "the" in 990/1000)</li>
+<li><strong>Document Length:</strong> Normalizes for size</li>
+</ul>
+<p><strong>When keywords win:</strong> Exact names, error codes, technical terms, IDs — "TSLA" finds exactly "TSLA".</p>
+</details>
+
+<details>
+<summary>Vector Embeddings — Semantic Search (70% weight)</summary>
+<p><strong>Vectors</strong> are lists of numbers. An embedding is a neural network that converts text into a vector (768 numbers). Key insight: <em>similar meanings → similar vectors</em>. "I love dogs" and "I adore puppies" get nearly identical vectors despite sharing no words.</p>
+<p><strong>Similarity search:</strong> (1) Convert query to vector, (2) compare against all stored vectors using <strong>cosine similarity</strong> (measures angle between vectors: same direction = 1.0, opposite = -1.0). All vectors are cached.</p>
+<p><strong>When vectors win:</strong> Conceptual queries — "how did my investments do?" finds "portfolio returns" and "stock performance." ClawdBot uses EmbeddingGemma 300M locally on CPU via <code>node-llama-cpp</code> — fully private.</p>
+</details>
+
+<details>
+<summary>Why Hybrid? Combining Both</summary>
+<p>BM25 misses semantic matches ("car" won't find "vehicle"). Vectors struggle with exact names and codes. <code>mergeHybridResults()</code> combines both (70% vector, 30% BM25) — documents scoring high on both rise to the top.</p>
+</details>
+
+<h3>SQLite Storage</h3>
+<p>Stored in SQLite (<code>~/.clawdbot/memory/agent.sqlite</code>) with <code>sqlite-vec</code> for vectors and FTS5 for full-text search. <strong>Why SQLite?</strong> Single file (easy backup), zero config (no server), embedded in process (no latency). Perfect for a personal, single-machine agent.</p>
+</div>
+
+<!-- SECTION 6: Provider System -->
+<div class="card">
+<h2>Provider System</h2>
+
+<h3>Auth Profile Rotation</h3>
+<p>An <strong>auth profile</strong> is a named credential (e.g., <code>anthropic:default</code>, <code>anthropic:backup-key</code>). Multiple profiles per provider. <strong>Why rotate?</strong> When one key hits its rate limit, ClawdBot silently switches to another and puts the exhausted one on cooldown.</p>
+
+<h3>Supported Providers</h3>
+<div style="display:flex;flex-wrap:wrap;gap:4px;margin:.8rem 0">
+<span class="tag">Anthropic (Claude)</span>
+<span class="tag">OpenAI (GPT/Codex)</span>
+<span class="tag">Google (Gemini)</span>
+<span class="tag">GitHub Copilot</span>
+<span class="tag">AWS Bedrock</span>
+<span class="tag">MiniMax</span>
+<span class="tag">Venice</span>
+<span class="tag">Qwen Portal</span>
+<span class="tag">Chutes</span>
+<span class="tag">OpenCode Zen</span>
+<span class="tag">Any OpenAI-compatible endpoint</span>
+</div>
+
+<h3>Failover Chain</h3>
+<p>When a request fails, ClawdBot follows a cascade:</p>
+<ol>
+<li><strong>Retry</strong> — transient errors get retried</li>
+<li><strong>Rotate auth profile</strong> — switch API key, same provider</li>
+<li><strong>Downgrade thinking</strong> — try without extended reasoning</li>
+<li><strong>Fallback model</strong> — switch to different model</li>
+<li><strong>Context compaction</strong> — summarize older messages, retry</li>
+</ol>
+
+<h3>Model Selection</h3>
+<p>Configured via <code>agents.defaults.model.primary</code>. Normalizes names across providers, checks context window guards, supports per-agent overrides. Dynamic catalog from pi-coding-agent SDK.</p>
+</div>
+
+<!-- SECTION 7: Platform Channels -->
+<div class="card">
+<h2>Platform Channels</h2>
+
+<h3>Supported Platforms</h3>
+<div style="display:flex;flex-wrap:wrap;gap:4px;margin:.8rem 0">
+<span class="tag">Telegram</span><span class="tag">Discord</span><span class="tag">WhatsApp</span><span class="tag">Signal</span><span class="tag">Slack</span><span class="tag">iMessage</span><span class="tag">LINE</span><span class="tag">Google Chat</span><span class="tag">MS Teams</span><span class="tag">Matrix</span><span class="tag">Mattermost</span><span class="tag">Nostr</span><span class="tag">Zalo</span><span class="tag">Nextcloud Talk</span><span class="tag">WebChat</span>
+</div>
+
+<h3>Channel Architecture</h3>
+<p>Each channel is an independent adapter translating platform protocols to ClawdBot's internal format via WebSocket:</p>
+<ul>
+<li><strong>New platforms</strong> only need a new adapter — core doesn't change</li>
+<li><strong>Platform features</strong> handled in adapter (reactions, buttons, typing indicators)</li>
+<li><strong>Formatting adapts</strong> per channel (no tables on WhatsApp, etc.)</li>
+</ul>
+
+<h3>Gateway as Control Plane</h3>
+<p>The Gateway is also the control plane: restart agent, apply config, self-update, manage sessions, monitor status. Supports Tailscale for secure remote access.</p>
+</div>
+
+<!-- SECTION 8: Identity & Personality -->
+<div class="card">
+<h2>Identity & Personality</h2>
+
+<h3>The Workspace File System</h3>
+<p>ClawdBot's behavior is shaped by plain text files in your workspace directory (<code>~/clawd/</code>). These files are injected into the system prompt on every agent run:</p>
+
+<table>
+<tr><th>File</th><th>Role</th></tr>
+<tr><td><code>AGENTS.md</code></td><td>Master behavior rulebook (244 lines) — the "constitution." Memory rules, error handling, formatting.</td></tr>
+<tr><td><code>SOUL.md</code></td><td>WHO the agent is — personality, name, style.</td></tr>
+<tr><td><code>USER.md</code></td><td>WHO you are — name, preferences, timezone.</td></tr>
+<tr><td><code>TOOLS.md</code></td><td>Tool-specific config notes.</td></tr>
+<tr><td><code>IDENTITY.md</code></td><td>Additional identity info.</td></tr>
+<tr><td><code>HEARTBEAT.md</code></td><td>Proactive check instructions (email, calendar, weather).</td></tr>
+</table>
+
+<h3>Write-Ahead Memory Logging</h3>
+<p>AGENTS.md requires capturing important context to files <em>before</em> responding — inspired by database WAL (Write-Ahead Logs). If context gets compacted, information is already safely persisted.</p>
+
+<h3>The Onboarding Process</h3>
+<p><code>clawdbot onboard</code> walks through setup: workspace creation, USER.md, first channel, auth. <code>clawdbot doctor</code> diagnoses issues.</p>
+</div>
+
+<!-- SECTION 9: Key Differentiators -->
+<div class="card">
+<h2>Key Differentiators</h2>
+<p>What makes ClawdBot unique compared to frameworks like LangChain, CrewAI, or AutoGen?</p>
+
+<h3>It's a Product, Not a Library</h3>
+<p>Most frameworks give you building blocks — you build UI, deployment, memory yourself. ClawdBot is complete: install, configure, message. Already running on your chat apps.</p>
+
+<h3>Persistent Identity Across Sessions</h3>
+<p>SOUL.md + AGENTS.md + MEMORY.md give continuous identity across sessions. Remembers projects, preferences, ongoing work. Git version-controlled.</p>
+
+<h3>Lane-Based Concurrency</h3>
+<p>Session serialization + global bounds. No race conditions, predictable under load. Rare in open-source frameworks.</p>
+
+<h3>Hybrid Memory Search</h3>
+<p>BM25 + vectors, fully local option. No Pinecone/Weaviate needed, full privacy.</p>
+
+<h3>Skill Marketplace</h3>
+<p>ClawdHub: community skills discovered and installed from within a conversation. Agent extends itself.</p>
+
+<h3>Proactive via Heartbeat + Cron</h3>
+<p>Heartbeat polls + cron jobs enable proactive behavior — email, weather, calendar checks without being asked. Not just a reactive chatbot.</p>
+
+<h3>Device Nodes</h3>
+<p>Companion apps on macOS/iOS/Android give access to camera, screen, notifications, location — bridging digital and physical.</p>
+</div>
+
+</div>
+
+<script>
+mermaid.initialize({
+  theme:'dark',
+  themeVariables:{
+    primaryColor:'#FFD700',primaryTextColor:'#0a0a0f',primaryBorderColor:'#FFD700',
+    lineColor:'#FFD700',secondaryColor:'#1a1a2e',tertiaryColor:'#111122',
+    background:'#0d0d1a',mainBkg:'#1a1a2e',nodeBorder:'#FFD700',
+    clusterBkg:'#111122',titleColor:'#FFD700',edgeLabelBackground:'#0d0d1a'
+  },
+  flowchart:{curve:'basis',padding:15}
+});
+</script>
+</body>
+</html>
